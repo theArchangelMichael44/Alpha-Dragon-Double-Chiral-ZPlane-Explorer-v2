@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Alpha Dragon: Double Chiral Z-Plane Explorer v2</title>
+  <style>
+    html, body {
+      margin: 0;
+      overflow: hidden;
+      background: #000;
+      color: #fff;
+      font-family: monospace;
+    }
+
+    canvas {
+      display: block;
+    }
+
+    .ui-stack {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      z-index: 10;
+      max-width: 340px;
+    }
+
+    .panel {
+      width: 320px;
+      background: rgba(0, 0, 0, 0.76);
+      border: 1px solid rgba(255,255,255,0.72);
+      padding: 10px 12px;
+      box-sizing: border-box;
+      box-shadow: 0 0 16px rgba(255,255,255,0.12);
+    }
+
+    .panel h3 {
+      margin: 0 0 8px 0;
+      font-size: 14px;
+      letter-spacing: 0.5px;
+    }
+
+    .panel div {
+      font-size: 12px;
+      line-height: 1.42;
+      white-space: pre-wrap;
+    }
+
+    .slider-wrap {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      pointer-events: auto;
+    }
+
+    .slider-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      align-items: center;
+      font-size: 12px;
+    }
+
+    .slider-row input[type="range"] {
+      width: 100%;
+      accent-color: #8ddcff;
+    }
+
+    .small-note {
+      margin-top: 6px;
+      opacity: 0.78;
+      font-size: 11px;
+      line-height: 1.35;
+      white-space: normal;
+    }
+
+    .footer-note {
+      position: absolute;
+      left: 12px;
+      bottom: 12px;
+      padding: 8px 10px;
+      background: rgba(0,0,0,0.58);
+      border: 1px solid rgba(255,255,255,0.44);
+      font-size: 12px;
+      z-index: 10;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="glCanvas"></canvas>
+
+  <div class="ui-stack">
+    <div class="panel">
+      <h3>ALPHA DRAGON // DOUBLE CHIRAL HUD</h3>
+      <div id="hud"></div>
+    </div>
+
+    <div class="panel">
+      <h3>DISTANCE / COUPLING LAB</h3>
+      <div class="slider-wrap">
+        <div class="slider-row">
+          <label for="separationSlider">Well separation</label>
+          <span id="separationValue">180</span>
+        </div>
+        <input id="separationSlider" type="range" min="40" max="540" step="1" value="180" />
+        <div class="small-note">
+          This is now a live control layer. As separation changes, coupling, bridge tension, and regime classification update in real time.
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>CONTROLS</h3>
+      <div id="controls">SPACE = Pause / Resume
+R = Reset
+M = Switch field mode
+T = Toggle trails
+C = Re-center system
+P / O = Add / Remove particles
+Z = Toggle Z-plane bias
+B = Toggle bridge overlay
+H = Toggle hemisphere overlay
+1 / 2 / 3 = Single / Double / Toroidal bias
+4 / 5 / 6 / 7 = Tight / Medium / Far / Extreme separation presets
+↑ / ↓ = Gravity strength
+[ / ] = Swirl strength
+- / = = Well separation
+, / . = Manual bridge strength trim
+L-Arrow / R-Arrow = Flip left / right chirality
+Shift + Arrow Left/Right = adjust orbital speed
+Click / Drag = Move system center</div>
+    </div>
+  </div>
+
+  <div class="footer-note">Interactive paired-well field instrument — chirality, bridge tension, Z-plane bias, toroidal drift, and distance scaling.</div>
+
+  <script>
+    const CONFIG = {
+      INITIAL_PARTICLES: 18000,
+      PARTICLE_ADD_STEP: 2000,
+      PARTICLE_REMOVE_STEP: 2000,
+      MAX_PARTICLES: 52000,
+      MIN_PARTICLES: 1000,
+      INITIAL_GRAVITY: 0.05,
+      INITIAL_SWIRL: 1.15,
+      INITIAL_BRIDGE: 0.18,
+      INITIAL_SEPARATION: 180,
+      INITIAL_ORBIT_SPEED: 0.010,
+      DAMPING: 0.996,
+      SOFTENING: 18,
+      BASE_SPAWN_RADIUS: 22,
+      CORE_PULL_SCALE: 0.10,
+      CENTER_PULL_SCALE: 0.05,
+      BRIDGE_WIDTH: 58,
+      ZPLANE_OFFSET: 0.20,
+      ZPLANE_FORCE: 0.028,
+      TRAIL_ALPHA: 0.13,
+      EDGE_RESET_PAD: 140,
+      CORE_MARKER_RADIUS: 7,
+      MIN_SEPARATION: 40,
+      MAX_SEPARATION: 540,
+      SEPARATION_SMOOTHING: 0.08,
+      PRESETS: {
+        tight: 72,
+        medium: 180,
+        far: 300,
+        extreme: 450
+      }
+    };
+
+    const FIELD_MODES = [
+      { name: "Balanced", gravityMultiplier: 1.0, swirlMultiplier: 1.0, bridgeMultiplier: 1.0, trailAlpha: 0.13, torusBias: 0.0 },
+      { name: "Collapse", gravityMultiplier: 1.65, swirlMultiplier: 0.52, bridgeMultiplier: 1.20, trailAlpha: 0.10, torusBias: 0.10 },
+      { name: "Swirl", gravityMultiplier: 0.82, swirlMultiplier: 1.85, bridgeMultiplier: 0.92, trailAlpha: 0.17, torusBias: 0.18 },
+      { name: "Bridge Lock", gravityMultiplier: 1.05, swirlMultiplier: 1.12, bridgeMultiplier: 1.85, trailAlpha: 0.15, torusBias: 0.24 }
+    ];
+
+    const TOPOLOGIES = [
+      { name: "Single Well" },
+      { name: "Double Well" },
+      { name: "Toroidal Bias" }
+    ];
+
+    const canvas = document.getElementById("glCanvas");
+    const ctx = canvas.getContext("2d");
+    const hud = document.getElementById("hud");
+    const separationSlider = document.getElementById("separationSlider");
+    const separationValue = document.getElementById("separationValue");
+
+    let particles = [];
+    let systemCenter = { x: 0, y: 0 };
+    let coreLeft = { x: 0, y: 0 };
+    let coreRight = { x: 0, y: 0 };
+    let bridgeCenter = { x: 0, y: 0 };
+    let zPlaneY = 0;
+
+    let paused = false;
+    let useTrails = true;
+    let draggingCenter = false;
+    let frameCount = 0;
+    let fieldModeIndex = 0;
+    let topologyIndex = 1;
+
+    let gravityStrength = CONFIG.INITIAL_GRAVITY;
+    let swirlStrength = CONFIG.INITIAL_SWIRL;
+    let baseBridgeStrength = CONFIG.INITIAL_BRIDGE;
+    let effectiveBridgeStrength = CONFIG.INITIAL_BRIDGE;
+    let wellSeparation = CONFIG.INITIAL_SEPARATION;
+    let targetSeparation = CONFIG.INITIAL_SEPARATION;
+    let orbitSpeed = CONFIG.INITIAL_ORBIT_SPEED;
+
+    let leftChirality = -1;
+    let rightChirality = 1;
+
+    let showBridgeOverlay = true;
+    let showHemisphereOverlay = true;
+    let useZPlane = true;
+
+    let phase = 0;
+    let liveCoupling = 0;
+    let interactionRegime = "Semi-Bound";
+    let torusBiasFactor = 0;
+
+    function resizeCanvas() {
+      const oldWidth = canvas.width || window.innerWidth;
+      const oldHeight = canvas.height || window.innerHeight;
+      const ratioX = systemCenter.x ? systemCenter.x / oldWidth : 0.5;
+      const ratioY = systemCenter.y ? systemCenter.y / oldHeight : 0.5;
+
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+
+      systemCenter.x = canvas.width * ratioX;
+      systemCenter.y = canvas.height * ratioY;
+      updateFieldGeometry();
+    }
+
+    function randomColor(side = 0) {
+      const hue = side < 0
+        ? 185 + Math.random() * 48
+        : 315 + Math.random() * 35;
+      return `hsl(${hue}, 100%, ${58 + Math.random() * 12}%)`;
+    }
+
+    function particleSideByPosition(x) {
+      return x < systemCenter.x ? -1 : 1;
+    }
+
+    function setTargetSeparation(value) {
+      targetSeparation = Math.max(CONFIG.MIN_SEPARATION, Math.min(CONFIG.MAX_SEPARATION, value));
+      separationSlider.value = String(targetSeparation);
+    }
+
+    function syncSeparationUI() {
+      separationValue.textContent = `${Math.round(wellSeparation)} px`;
+    }
+
+    function getDistanceNormalized() {
+      return (wellSeparation - CONFIG.MIN_SEPARATION) / (CONFIG.MAX_SEPARATION - CONFIG.MIN_SEPARATION);
+    }
+
+    function classifyRegime() {
+      if (topologyIndex === 0) return "Unified";
+      if (wellSeparation <= 95) return leftChirality === rightChirality ? "Toroidal Lock" : "Pinch / Collision";
+      if (wellSeparation <= 190) return leftChirality === rightChirality ? "Semi-Bound" : "Bridge Tension";
+      if (wellSeparation <= 320) return "Coupled Pair";
+      return "Decoupled";
+    }
+
+    function updateDistanceModel() {
+      const distanceNorm = getDistanceNormalized();
+      const inverseDistance = 1 / (1 + wellSeparation * 0.012);
+      const chiralityAligned = leftChirality === rightChirality ? 1 : 0;
+      const chiralityFactor = chiralityAligned ? 1.08 : 0.94;
+
+      liveCoupling = Math.max(0.03, Math.min(1.0, inverseDistance * 2.35 * chiralityFactor));
+      effectiveBridgeStrength = baseBridgeStrength * (0.35 + liveCoupling * 1.85);
+      torusBiasFactor = Math.max(0, (1 - distanceNorm) * (chiralityAligned ? 1.0 : 0.42));
+      interactionRegime = classifyRegime();
+      syncSeparationUI();
+    }
+
+    function spawnParticle(spawnRadius = CONFIG.BASE_SPAWN_RADIUS, forcedSide = null) {
+      const side = forcedSide ?? (Math.random() < 0.5 ? -1 : 1);
+      const anchor = topologyIndex === 0
+        ? systemCenter
+        : (side < 0 ? coreLeft : coreRight);
+
+      const angle = Math.random() * Math.PI * 2;
+      const radius = 6 + Math.random() * spawnRadius;
+      const speed = Math.random() * Math.max(0.4, swirlStrength);
+      const chirality = side < 0 ? leftChirality : rightChirality;
+      const tangentAngle = angle + chirality * Math.PI / 2;
+
+      return {
+        x: anchor.x + Math.cos(angle) * radius,
+        y: anchor.y + Math.sin(angle) * radius,
+        vx: Math.cos(tangentAngle) * speed,
+        vy: Math.sin(tangentAngle) * speed,
+        mass: 1 + Math.random() * 1.8,
+        color: randomColor(side),
+        side,
+        bridgeAffinity: Math.random(),
+      };
+    }
+
+    function createParticles(num) {
+      const room = Math.max(0, CONFIG.MAX_PARTICLES - particles.length);
+      const count = Math.min(num, room);
+      for (let i = 0; i < count; i++) {
+        particles.push(spawnParticle());
+      }
+    }
+
+    function resetSimulation() {
+      particles = [];
+      frameCount = 0;
+      phase = 0;
+      systemCenter = { x: canvas.width / 2, y: canvas.height / 2 };
+      wellSeparation = CONFIG.INITIAL_SEPARATION;
+      setTargetSeparation(CONFIG.INITIAL_SEPARATION);
+      updateFieldGeometry();
+      createParticles(CONFIG.INITIAL_PARTICLES);
+      updateHUD();
+    }
+
+    function updateFieldGeometry() {
+      phase += orbitSpeed;
+      wellSeparation += (targetSeparation - wellSeparation) * CONFIG.SEPARATION_SMOOTHING;
+      updateDistanceModel();
+
+      const halfSep = Math.max(10, wellSeparation * 0.5);
+      const verticalSwing = Math.sin(phase * 0.75) * (wellSeparation * 0.08);
+
+      coreLeft.x = systemCenter.x - Math.cos(phase) * halfSep;
+      coreLeft.y = systemCenter.y + verticalSwing;
+
+      coreRight.x = systemCenter.x + Math.cos(phase) * halfSep;
+      coreRight.y = systemCenter.y - verticalSwing;
+
+      bridgeCenter.x = (coreLeft.x + coreRight.x) * 0.5;
+      bridgeCenter.y = (coreLeft.y + coreRight.y) * 0.5;
+      zPlaneY = canvas.height * (0.5 + CONFIG.ZPLANE_OFFSET);
+
+      if (topologyIndex === 0) {
+        coreLeft.x = systemCenter.x;
+        coreLeft.y = systemCenter.y;
+        coreRight.x = systemCenter.x;
+        coreRight.y = systemCenter.y;
+        bridgeCenter.x = systemCenter.x;
+        bridgeCenter.y = systemCenter.y;
+      }
+    }
+
+    function updateHUD(avgVelocity = 0, bridgeLoad = 0) {
+      const mode = FIELD_MODES[fieldModeIndex];
+      const topology = TOPOLOGIES[topologyIndex];
+      hud.textContent =
+`Field mode: ${mode.name}
+Topology: ${topology.name}
+State: ${paused ? "Paused" : "Running"}
+Particles: ${particles.length.toLocaleString()}
+Gravity: ${gravityStrength.toFixed(3)}
+Swirl: ${swirlStrength.toFixed(2)}
+Bridge base: ${baseBridgeStrength.toFixed(2)}
+Bridge effective: ${effectiveBridgeStrength.toFixed(3)}
+Separation: ${wellSeparation.toFixed(1)} px
+Coupling: ${liveCoupling.toFixed(3)}
+Regime: ${interactionRegime}
+Torus bias: ${torusBiasFactor.toFixed(3)}
+Orbit speed: ${orbitSpeed.toFixed(3)}
+Left chirality: ${leftChirality < 0 ? "Left-handed" : "Right-handed"}
+Right chirality: ${rightChirality < 0 ? "Left-handed" : "Right-handed"}
+Z-plane: ${useZPlane ? "On" : "Off"}
+Bridge overlay: ${showBridgeOverlay ? "On" : "Off"}
+Hemispheres: ${showHemisphereOverlay ? "On" : "Off"}
+Trails: ${useTrails ? "On" : "Off"}
+Avg velocity: ${avgVelocity.toFixed(3)}
+Bridge load: ${bridgeLoad.toFixed(3)}
+Frame: ${frameCount.toLocaleString()}`;
+    }
+
+    function applyBackground() {
+      if (useTrails) {
+        const alpha = FIELD_MODES[fieldModeIndex].trailAlpha;
+        ctx.fillStyle = `rgba(0,0,0,${alpha})`;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      } else {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+      }
+    }
+
+    function drawOverlays() {
+      ctx.save();
+
+      if (showHemisphereOverlay) {
+        ctx.fillStyle = "rgba(70, 170, 255, 0.06)";
+        ctx.fillRect(0, 0, canvas.width * 0.5, canvas.height);
+        ctx.fillStyle = "rgba(255, 80, 200, 0.06)";
+        ctx.fillRect(canvas.width * 0.5, 0, canvas.width * 0.5, canvas.height);
+
+        ctx.beginPath();
+        ctx.moveTo(systemCenter.x, 0);
+        ctx.lineTo(systemCenter.x, canvas.height);
+        ctx.strokeStyle = "rgba(255,255,255,0.16)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+
+      if (useZPlane) {
+        ctx.beginPath();
+        ctx.moveTo(0, zPlaneY);
+        ctx.lineTo(canvas.width, zPlaneY);
+        ctx.strokeStyle = "rgba(255,215,120,0.20)";
+        ctx.lineWidth = 1.2;
+        ctx.setLineDash([10, 10]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      if (showBridgeOverlay && topologyIndex !== 0) {
+        ctx.beginPath();
+        ctx.moveTo(coreLeft.x, coreLeft.y);
+        ctx.lineTo(coreRight.x, coreRight.y);
+        ctx.strokeStyle = `rgba(255,255,255,${0.18 + liveCoupling * 0.26})`;
+        ctx.lineWidth = 1.5 + liveCoupling * 2.2;
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(bridgeCenter.x, bridgeCenter.y, 10 + effectiveBridgeStrength * 24, 0, Math.PI * 2);
+        ctx.strokeStyle = "rgba(255, 210, 110, 0.24)";
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+      }
+
+      if (topologyIndex === 2 || interactionRegime === "Toroidal Lock") {
+        const rx = Math.max(20, wellSeparation * (0.72 - torusBiasFactor * 0.16));
+        const ry = Math.max(12, wellSeparation * (0.28 + torusBiasFactor * 0.12));
+        ctx.beginPath();
+        ctx.ellipse(systemCenter.x, systemCenter.y, rx, ry, phase * 0.3, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(180,255,255,${0.12 + torusBiasFactor * 0.18})`;
+        ctx.lineWidth = 1.1;
+        ctx.stroke();
+      }
+
+      drawCoreMarker(coreLeft, leftChirality, "rgba(120,220,255,0.92)");
+      if (topologyIndex !== 0) {
+        drawCoreMarker(coreRight, rightChirality, "rgba(255,120,220,0.92)");
+      }
+
+      ctx.restore();
+    }
+
+    function drawCoreMarker(core, chirality, color) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(core.x, core.y, CONFIG.CORE_MARKER_RADIUS, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.shadowColor = color;
+      ctx.shadowBlur = 16;
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.arc(core.x, core.y, 20, 0, Math.PI * 2);
+      ctx.strokeStyle = color.replace("0.92", "0.24");
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      const arrowAngle = chirality < 0 ? -Math.PI / 2 : Math.PI / 2;
+      ctx.beginPath();
+      ctx.moveTo(core.x, core.y);
+      ctx.lineTo(core.x + Math.cos(arrowAngle) * 22, core.y + Math.sin(arrowAngle) * 22);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.4;
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function computeBridgeFactor(p) {
+      const dx = coreRight.x - coreLeft.x;
+      const dy = coreRight.y - coreLeft.y;
+      const lengthSq = dx * dx + dy * dy || 1;
+      const t = ((p.x - coreLeft.x) * dx + (p.y - coreLeft.y) * dy) / lengthSq;
+      const clampedT = Math.max(0, Math.min(1, t));
+      const projX = coreLeft.x + clampedT * dx;
+      const projY = coreLeft.y + clampedT * dy;
+      const offX = p.x - projX;
+      const offY = p.y - projY;
+      const lineDistance = Math.sqrt(offX * offX + offY * offY);
+      const alongCenterBias = 1 - Math.abs(clampedT - 0.5) * 2;
+      const widthFalloff = Math.max(0, 1 - lineDistance / (CONFIG.BRIDGE_WIDTH + wellSeparation * 0.1));
+      return Math.max(0, alongCenterBias * widthFalloff * (0.4 + liveCoupling * 0.9));
+    }
+
+    function updateParticles() {
+      applyBackground();
+      updateFieldGeometry();
+      drawOverlays();
+
+      const mode = FIELD_MODES[fieldModeIndex];
+      let totalVelocity = 0;
+      let bridgeLoad = 0;
+
+      for (let i = 0; i < particles.length; i++) {
+        const p = particles[i];
+
+        if (topologyIndex !== 0) {
+          p.side = particleSideByPosition(p.x);
+        } else {
+          p.side = 0;
+        }
+
+        const localCore = topologyIndex === 0
+          ? systemCenter
+          : (p.side < 0 ? coreLeft : coreRight);
+        const chirality = topologyIndex === 0
+          ? leftChirality
+          : (p.side < 0 ? leftChirality : rightChirality);
+
+        let dxCore = localCore.x - p.x;
+        let dyCore = localCore.y - p.y;
+        let dCore = Math.sqrt(dxCore * dxCore + dyCore * dyCore) + CONFIG.SOFTENING;
+        let nxCore = dxCore / dCore;
+        let nyCore = dyCore / dCore;
+        let txCore = -nyCore * chirality;
+        let tyCore = nxCore * chirality;
+
+        let dxCenter = systemCenter.x - p.x;
+        let dyCenter = systemCenter.y - p.y;
+        let dCenter = Math.sqrt(dxCenter * dxCenter + dyCenter * dyCenter) + CONFIG.SOFTENING;
+        let nxCenter = dxCenter / dCenter;
+        let nyCenter = dyCenter / dCenter;
+
+        const gravCore = (p.mass * gravityStrength * mode.gravityMultiplier) / (dCore * CONFIG.CORE_PULL_SCALE + 1);
+        const gravCenter = (p.mass * gravityStrength * 0.42) / (dCenter * CONFIG.CENTER_PULL_SCALE + 1);
+        const swirlCore = (swirlStrength * mode.swirlMultiplier) / (dCore * 0.032 + 1);
+
+        p.vx += gravCore * nxCore + gravCenter * nxCenter + swirlCore * txCore;
+        p.vy += gravCore * nyCore + gravCenter * nyCenter + swirlCore * tyCore;
+
+        if (topologyIndex !== 0) {
+          const bridgeFactor = computeBridgeFactor(p);
+          if (bridgeFactor > 0) {
+            const bridgeDx = bridgeCenter.x - p.x;
+            const bridgeDy = bridgeCenter.y - p.y;
+            const bridgeDist = Math.sqrt(bridgeDx * bridgeDx + bridgeDy * bridgeDy) + CONFIG.SOFTENING;
+            const bridgeNx = bridgeDx / bridgeDist;
+            const bridgeNy = bridgeDy / bridgeDist;
+            const bridgeHandedness = (leftChirality + rightChirality) === 0 ? 1 : Math.sign(leftChirality + rightChirality);
+            const bridgeTangentialX = -bridgeNy * bridgeHandedness;
+            const bridgeTangentialY = bridgeNx * bridgeHandedness;
+            const bridgeForce = effectiveBridgeStrength * mode.bridgeMultiplier * bridgeFactor * (0.85 + p.bridgeAffinity * 0.6);
+
+            p.vx += bridgeForce * bridgeNx + bridgeForce * 0.28 * bridgeTangentialX;
+            p.vy += bridgeForce * bridgeNy + bridgeForce * 0.28 * bridgeTangentialY;
+            bridgeLoad += bridgeFactor;
+          }
+        }
+
+        if (useZPlane) {
+          const dz = zPlaneY - p.y;
+          const zInfluence = (CONFIG.ZPLANE_FORCE * (0.75 + p.mass * 0.12)) / (Math.abs(dz) * 0.06 + 1);
+          p.vy += zInfluence * Math.sign(dz);
+        }
+
+        if (topologyIndex === 2 || interactionRegime === "Toroidal Lock") {
+          const torusDx = p.x - systemCenter.x;
+          const torusDy = p.y - systemCenter.y;
+          const ringRadius = Math.max(28, wellSeparation * (0.52 - torusBiasFactor * 0.10));
+          const torusDistance = Math.sqrt(torusDx * torusDx + torusDy * torusDy) || 1;
+          const radialError = ringRadius - torusDistance;
+          const torusPull = (0.008 + mode.torusBias + torusBiasFactor * 0.07) * radialError / ringRadius;
+          p.vx += (torusDx / torusDistance) * torusPull;
+          p.vy += (torusDy / torusDistance) * torusPull;
+        }
+
+        p.vx *= CONFIG.DAMPING;
+        p.vy *= CONFIG.DAMPING;
+
+        p.x += p.vx;
+        p.y += p.vy;
+
+        const speed = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
+        totalVelocity += speed;
+
+        if (
+          p.x < -CONFIG.EDGE_RESET_PAD ||
+          p.x > canvas.width + CONFIG.EDGE_RESET_PAD ||
+          p.y < -CONFIG.EDGE_RESET_PAD ||
+          p.y > canvas.height + CONFIG.EDGE_RESET_PAD
+        ) {
+          particles[i] = spawnParticle(28);
+          continue;
+        }
+
+        if (topologyIndex !== 0) {
+          p.color = p.side < 0 ? randomColor(-1) : randomColor(1);
+        }
+
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.mass, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      frameCount++;
+      updateHUD(particles.length ? totalVelocity / particles.length : 0, particles.length ? bridgeLoad / particles.length : 0);
+    }
+
+    function animate() {
+      if (!paused) {
+        updateParticles();
+      }
+      requestAnimationFrame(animate);
+    }
+
+    function moveCenter(x, y) {
+      systemCenter.x = x;
+      systemCenter.y = y;
+      updateFieldGeometry();
+      updateHUD();
+    }
+
+    canvas.addEventListener("mousedown", (e) => {
+      draggingCenter = true;
+      moveCenter(e.clientX, e.clientY);
+    });
+
+    canvas.addEventListener("mousemove", (e) => {
+      if (draggingCenter) {
+        moveCenter(e.clientX, e.clientY);
+      }
+    });
+
+    window.addEventListener("mouseup", () => {
+      draggingCenter = false;
+    });
+
+    canvas.addEventListener("click", (e) => {
+      moveCenter(e.clientX, e.clientY);
+    });
+
+    window.addEventListener("resize", () => {
+      resizeCanvas();
+      updateHUD();
+    });
+
+    separationSlider.addEventListener("input", (e) => {
+      setTargetSeparation(Number(e.target.value));
+      updateHUD();
+    });
+
+    document.addEventListener("keydown", (e) => {
+      if (e.key === " ") {
+        e.preventDefault();
+        paused = !paused;
+      } else if (e.key === "r" || e.key === "R") {
+        resetSimulation();
+      } else if (e.key === "m" || e.key === "M") {
+        fieldModeIndex = (fieldModeIndex + 1) % FIELD_MODES.length;
+      } else if (e.key === "t" || e.key === "T") {
+        useTrails = !useTrails;
+        if (!useTrails) ctx.clearRect(0, 0, canvas.width, canvas.height);
+      } else if (e.key === "c" || e.key === "C") {
+        moveCenter(canvas.width / 2, canvas.height / 2);
+      } else if (e.key === "p" || e.key === "P") {
+        createParticles(CONFIG.PARTICLE_ADD_STEP);
+      } else if (e.key === "o" || e.key === "O") {
+        const removable = Math.min(CONFIG.PARTICLE_REMOVE_STEP, Math.max(0, particles.length - CONFIG.MIN_PARTICLES));
+        particles.splice(0, removable);
+      } else if (e.key === "z" || e.key === "Z") {
+        useZPlane = !useZPlane;
+      } else if (e.key === "b" || e.key === "B") {
+        showBridgeOverlay = !showBridgeOverlay;
+      } else if (e.key === "h" || e.key === "H") {
+        showHemisphereOverlay = !showHemisphereOverlay;
+      } else if (e.key === "1") {
+        topologyIndex = 0;
+      } else if (e.key === "2") {
+        topologyIndex = 1;
+      } else if (e.key === "3") {
+        topologyIndex = 2;
+      } else if (e.key === "4") {
+        setTargetSeparation(CONFIG.PRESETS.tight);
+      } else if (e.key === "5") {
+        setTargetSeparation(CONFIG.PRESETS.medium);
+      } else if (e.key === "6") {
+        setTargetSeparation(CONFIG.PRESETS.far);
+      } else if (e.key === "7") {
+        setTargetSeparation(CONFIG.PRESETS.extreme);
+      } else if (e.key === "ArrowUp") {
+        gravityStrength = Math.min(0.25, gravityStrength + 0.01);
+      } else if (e.key === "ArrowDown") {
+        gravityStrength = Math.max(0.005, gravityStrength - 0.01);
+      } else if (e.key === "[") {
+        swirlStrength = Math.max(0, swirlStrength - 0.1);
+      } else if (e.key === "]") {
+        swirlStrength = Math.min(4.5, swirlStrength + 0.1);
+      } else if (e.key === "-") {
+        setTargetSeparation(targetSeparation - 10);
+      } else if (e.key === "=") {
+        setTargetSeparation(targetSeparation + 10);
+      } else if (e.key === ",") {
+        baseBridgeStrength = Math.max(0, baseBridgeStrength - 0.03);
+      } else if (e.key === ".") {
+        baseBridgeStrength = Math.min(2.6, baseBridgeStrength + 0.03);
+      } else if (e.key === "ArrowLeft") {
+        if (e.shiftKey) {
+          orbitSpeed = Math.max(0.001, orbitSpeed - 0.001);
+        } else {
+          leftChirality *= -1;
+        }
+      } else if (e.key === "ArrowRight") {
+        if (e.shiftKey) {
+          orbitSpeed = Math.min(0.04, orbitSpeed + 0.001);
+        } else {
+          rightChirality *= -1;
+        }
+      }
+
+      updateFieldGeometry();
+      updateHUD();
+    });
+
+    resizeCanvas();
+    resetSimulation();
+    ctx.fillStyle = "black";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    animate();
+  </script>
+</body>
+</html>
